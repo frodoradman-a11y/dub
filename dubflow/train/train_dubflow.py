@@ -44,7 +44,7 @@ def build_dataset(cfg, stats: dict, return_wav: bool, seed: int):
     if d.stage == "pretrain":
         return PretrainDataset(d.manifest, d.cache, d.index, stats, d, n_streams, return_wav, seed)
     if d.stage == "dub":
-        return DubDataset(d.dub_manifest, d.dub_src_cache, d.dub_tgt_cache, stats, d, n_streams, return_wav)
+        return DubDataset(d.dub_manifest, d.dub_src_cache, d.dub_tgt_cache, stats, d, n_streams, return_wav, seed=seed)
     raise ValueError(f"unknown data.stage {d.stage}")
 
 
@@ -61,17 +61,38 @@ def load_stats(cfg) -> dict:
     if stats is None:
         cache = cfg.data.cache if cfg.data.stage == "pretrain" else cfg.data.dub_tgt_cache
         stats = merge_latent_stats(cache)
-    dims = {"spk_island": stats["speaker_dim"], "spk_short": stats["speaker_dim"], "emotion": stats["emotion_dim"]}
+    dims = {"spk_island": stats["speaker_dim"], "spk_short": stats["speaker_dim"], "spk_overlap": stats["speaker_dim"],
+            "emotion": stats["emotion_dim"]}
     for k, v in dims.items():
         if int(cfg.model.tracks[k]) != int(v):
             raise ValueError(f"model.tracks.{k}={cfg.model.tracks[k]} but feature cache has {v}; fix the config")
     return stats
 
 
+@torch.no_grad()
+def reencode_overlaps(batch: dict, vae, stats: dict) -> None:
+    """Synthetic overlapping-speech scenes exist only as mixed waveforms: encode
+    them with the (frozen) VAE in place of the placeholder latents. In
+    pretraining the conditioning source is the scene itself, so src_latent too."""
+    sel = batch["reencode"]
+    if "wav" not in batch or not bool(sel.any()):
+        return
+    t = batch["x1"].shape[1]
+    _, mu, _ = vae.encode(batch["wav"][sel].float())
+    z = mu.transpose(1, 2).float()[:, :t]
+    z = torch.nn.functional.pad(z, (0, 0, 0, t - z.shape[1]))
+    z = (z - stats["mean"].to(z.device)) / stats["std"].to(z.device)
+    x1 = torch.where(batch["frame_mask"][sel][..., None], z, batch["x1"][sel])
+    batch["x1"][sel] = x1
+    ts = batch["src_latent"].shape[1]
+    batch["src_latent"][sel] = x1[:, :ts]
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
-    ap.add_argument("--vae", default=None, help="optional DubVAE checkpoint to write audio samples")
+    ap.add_argument("--vae", default=None, help="DubVAE checkpoint: audio samples, and encoding of synthetic "
+                                                "overlap scenes (required when data.overlap_p > 0 in pretraining)")
     ap.add_argument("overrides", nargs="*")
     args = ap.parse_args(argv)
     cfg = load_config(args.config, args.overrides)
@@ -116,6 +137,16 @@ def main(argv: list[str] | None = None) -> None:
     ddp = DDP(model, device_ids=[device.index] if device.type == "cuda" else None,
               find_unused_parameters=True) if world > 1 else model
 
+    vae_path = args.vae or cfg.train.get("vae")
+    overlap_vae = None
+    if cfg.data.stage == "pretrain" and float(cfg.data.get("overlap_p", 0.0)) > 0:
+        if not vae_path:
+            raise ValueError("data.overlap_p > 0 needs the DubVAE to encode mixed overlap scenes: pass --vae "
+                             "(or train.vae=...), or set data.overlap_p=0")
+        from ..utils.checkpoint import load_vae
+
+        overlap_vae = load_vae(vae_path, device)
+        overlap_vae.requires_grad_(False)
     repa_on = bool(cfg.model.repa.enabled)
     teacher = SSLTeacher(cfg.repa_teacher.backend, str(device), SAMPLE_RATE, cfg.repa_teacher.get("layer", 16)) if repa_on else None
     ds = build_dataset(cfg, stats, return_wav=repa_on, seed=1000 + rank + step)
@@ -132,10 +163,12 @@ def main(argv: list[str] | None = None) -> None:
         agg: dict[str, float] = {}
         for _ in range(accum):
             batch = to_device(next(dl), device)
-            if teacher is not None and step < cfg.repa_teacher.get("until_step", 10**12) and "wav" in batch:
-                batch["repa_target"] = teacher(batch.pop("wav"), batch["x1"].shape[1])
-            else:
-                batch.pop("wav", None)
+            if overlap_vae is not None:
+                reencode_overlaps(batch, overlap_vae, stats)
+            wav, wav_ok = batch.pop("wav", None), batch.pop("wav_ok", None)
+            if (teacher is not None and step < cfg.repa_teacher.get("until_step", 10**12) and wav is not None
+                    and bool(wav_ok.all())):
+                batch["repa_target"] = teacher(wav, batch["x1"].shape[1])
             with autocast(device, prec):
                 losses = ddp(batch)
             (losses["loss"] / accum).backward()
@@ -156,8 +189,8 @@ def main(argv: list[str] | None = None) -> None:
             save_checkpoint(last, **payload)
             payload.pop("opt")
             save_checkpoint(out_dir / f"dubflow_{step:07d}.pt", **payload)
-            if args.vae:
-                write_sample(unwrap(ema.shadow), args.vae, batch, cfg, stats, out_dir / "samples" / f"{step:07d}.wav", device)
+            if vae_path:
+                write_sample(unwrap(ema.shadow), vae_path, batch, cfg, stats, out_dir / "samples" / f"{step:07d}.wav", device)
     cleanup_distributed()
 
 

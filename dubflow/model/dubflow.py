@@ -13,6 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ..data.tracks import TRACK_ORDER
 from ..text.tokenizer import LANGS, TextTokenizer
 from .backbones import DiTBackbone, MultiRateUNet
 from .conditioning import (
@@ -50,12 +51,22 @@ class DubFlow(nn.Module):
         self.n_streams = m.get("n_streams", 2)
         self.stream_emb = nn.Parameter(torch.zeros(self.n_streams, dim))
         self.track_groups = dict(m.tracks)
+        if tuple(self.track_groups) != TRACK_ORDER:
+            raise ValueError(f"model.tracks must list {TRACK_ORDER} in this order, got {tuple(self.track_groups)}")
         self.track_proj = TrackProjector(self.track_groups, dim)
         self.in_proj = nn.Linear(m.latent_dim, dim)
         self.t_embed = TimestepEmbedding(dim)
         self.lang_embed = nn.Embedding(len(LANGS), dim)
         nn.init.zeros_(self.lang_embed.weight)
         self.step_embed = TimestepEmbedding(dim) if m.get("step_cond", False) else None
+        # Scene continuity: known context frames (end of the previous scene) enter
+        # as an extra input channel [latent, known-flag]; zero-init so older
+        # checkpoints start out unchanged.
+        self.ctx_enabled = bool(m.get("context", {}).get("enabled", False))
+        if self.ctx_enabled:
+            self.ctx_proj = nn.Linear(m.latent_dim + 1, dim)
+            nn.init.zeros_(self.ctx_proj.weight)
+            nn.init.zeros_(self.ctx_proj.bias)
 
         bb = m.backbone
         if bb.type == "dit":
@@ -124,13 +135,38 @@ class DubFlow(nn.Module):
         has = (frame_tok >= 0)[..., None].to(up.dtype)
         up = up + self.stream_emb[: up.shape[1], None].to(up.dtype) * has
         cond_seq = up.sum(1) + self.track_proj(batch["tracks"], drop.tracks)
-        out = {"cond_seq": cond_seq, "valid": batch["frame_mask"], "lang": batch["lang"]}
+        out = {"valid": batch["frame_mask"], "lang": batch["lang"]}
+        known = self.context(batch)
+        if known is not None:
+            ctx, km = known
+            cond_seq = cond_seq + self.ctx_proj(torch.cat([ctx * km[..., None], km[..., None]], -1).to(cond_seq.dtype))
+            out["ctx"], out["ctx_mask"] = ctx, km
+        out["cond_seq"] = cond_seq
         if self.timbre_enabled:
             src = self.src_encoder(batch["src_latent"], batch["src_mask"])
             win, valid = gather_windows(src, batch["src_mask"], batch["win_center"], self.window_half, self.window_stride)
             valid = valid & (drop.timbre[:, None, None] > 0.5)
             out["win"], out["win_valid"] = win, valid
         return out
+
+    def context(self, batch: dict) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """(context latent [B,T,D], known mask [B,T] float) or None. During training
+        the context is the target itself (batch["x1"]); at inference batch["ctx"]."""
+        if not self.ctx_enabled or "ctx_mask" not in batch or not bool(batch["ctx_mask"].any()):
+            return None
+        km = (batch["ctx_mask"] & batch["frame_mask"]).float()
+        ctx = batch["ctx"] if "ctx" in batch else batch["x1"]
+        return ctx.float(), km
+
+    @staticmethod
+    def apply_context(x: torch.Tensor, x0: torch.Tensor, t: torch.Tensor | float, cond: dict) -> torch.Tensor:
+        """Put the known frames on the data interpolant (1 - t) x0 + t ctx."""
+        if "ctx_mask" not in cond:
+            return x
+        t = torch.as_tensor(t, device=x.device, dtype=x.dtype)
+        t = t.view(-1, 1, 1) if t.ndim else t
+        known = cond["ctx_mask"][..., None].to(x.dtype)
+        return x * (1 - known) + ((1 - t) * x0 + t * cond["ctx"].to(x.dtype)) * known
 
     # ------------------------------------------------------------------ network
     def _timbre(self, layer: int, h: torch.Tensor, cond: dict) -> torch.Tensor | None:
@@ -166,7 +202,10 @@ class DubFlow(nn.Module):
         x_t = (1 - tt) * x0 + tt * x1
         v, repa = self.velocity(x_t, t, cond)
         target = x1 - x0
-        m = (batch["frame_mask"] & batch["loss_mask"]).to(v.dtype)[..., None]
+        keep = batch["frame_mask"] & batch["loss_mask"]
+        if "ctx_mask" in batch:
+            keep = keep & ~batch["ctx_mask"]  # known context frames are given, not predicted
+        m = keep.to(v.dtype)[..., None]
         denom = m.sum().clamp_min(1.0) * v.shape[-1]
         fm = ((v.float() - target.float()) ** 2 * m).sum() / denom
         losses = {"fm": fm}
@@ -199,6 +238,7 @@ class DubFlow(nn.Module):
         dev = valid.device
         gen = torch.Generator(device=dev).manual_seed(seed) if seed is not None else None
         x = x0 if x0 is not None else torch.randn(b, t, self.latent_dim, device=dev, generator=gen)
+        noise = x.clone()
         full = self.full_keep(b, dev)
         cond = self.prepare(batch, full)
         guidance = {k: v for k, v in (guidance or {}).items() if v}
@@ -221,6 +261,7 @@ class DubFlow(nn.Module):
             ts = ts + sway * (torch.cos(math.pi / 2 * ts) - 1 + ts)
         for i in range(steps):
             t0, t1 = ts[i], ts[i + 1]
+            x = self.apply_context(x, noise, t0, cond)
             tb = t0.expand(b)
             sb = (t1 - t0).expand(b) if step_cond else None
             v, _ = self.velocity(x, tb, cond, sb)
@@ -231,6 +272,7 @@ class DubFlow(nn.Module):
                     vg = vg + guidance[k] * (v - vd)
                 v = vg
             x = x + (t1 - t0) * v
+        x = self.apply_context(x, noise, 1.0, cond)
         return x * valid[..., None].to(x.dtype)
 
 
@@ -244,6 +286,8 @@ def count_parameters(model: nn.Module) -> dict[str, float]:
         "backbone": model.backbone,
         "track_proj": model.track_proj,
     }
+    if getattr(model, "ctx_enabled", False):
+        groups["context"] = model.ctx_proj
     if getattr(model, "timbre_enabled", False):
         groups["timbre"] = nn.ModuleList([model.src_encoder, model.timbre_attn])
     out = {k: sum(p.numel() for p in v.parameters()) / 1e6 for k, v in groups.items()}

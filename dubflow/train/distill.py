@@ -51,13 +51,13 @@ class StudentWrapper(torch.nn.Module):
         cond = self.student.prepare(batch, self.student.full_keep(x_t.shape[0], x_t.device))
         v, _ = self.student.velocity(x_t, t, cond, dt)
         pred = x_t + dt[:, None, None] * v
-        m = batch["frame_mask"].float()[..., None]
+        m = (batch["frame_mask"] & ~batch["ctx_mask"]).float()[..., None]  # known context frames are not predicted
         err = ((pred.float() - target.float()) ** 2 / dt[:, None, None] ** 2 * m).sum()
         return err / (m.sum() * v.shape[-1]).clamp_min(1)
 
 
 @torch.no_grad()
-def teacher_target(teacher: DubFlow, batch: dict, x_t, t, dt, substeps: int, guidance: dict):
+def teacher_target(teacher: DubFlow, batch: dict, x_t, t, dt, substeps: int, guidance: dict, x0=None):
     b = x_t.shape[0]
     dev = x_t.device
     full = teacher.full_keep(b, dev)
@@ -80,12 +80,16 @@ def teacher_target(teacher: DubFlow, batch: dict, x_t, t, dt, substeps: int, gui
     h = dt / substeps
     for i in range(substeps):
         ti = t + h * i
+        if x0 is not None:
+            x = teacher.apply_context(x, x0, ti, cond)
         v, _ = teacher.velocity(x, ti, cond)
         vg = v.clone()
         for s, vc in variants.values():
             vu, _ = teacher.velocity(x, ti, vc)
             vg = vg + s * (v - vu)
         x = x + h[:, None, None] * vg
+    if x0 is not None:
+        x = teacher.apply_context(x, x0, t + dt, cond)
     return x
 
 
@@ -141,7 +145,7 @@ def main(argv: list[str] | None = None) -> None:
         dt = torch.full((b,), 1.0 / k_steps, device=device)
         x0 = torch.randn_like(x1)
         x_t = (1 - t[:, None, None]) * x0 + t[:, None, None] * x1
-        target = teacher_target(teacher, batch, x_t, t, dt, sub, guidance)
+        target = teacher_target(teacher, batch, x_t, t, dt, sub, guidance, x0)
         with autocast(device, cfg.train.precision):
             loss = ddp(batch, x_t, t, dt, target)
         opt.zero_grad(set_to_none=True)

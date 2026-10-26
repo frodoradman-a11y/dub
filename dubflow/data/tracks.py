@@ -7,19 +7,27 @@ exactly the same inputs. Frame rate = 25 Hz.
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 import torch.nn.functional as F
 
-TRACK_ORDER = ("spk_island", "spk_short", "prosody", "emotion", "activity")
+# Concatenation order of the frame tracks (model.tracks in the config must list
+# the same names in the same order).
+#   spk_island  identity of the speech island (VAD run) the frame belongs to
+#   spk_short   ~1 s sliding-window identity (follows speaker changes inside an island)
+#   spk_overlap identity of the stream-1 voice on chunks that overlap another stream
+#   prosody     [log-F0 (speaker-normalized), level, voicing]
+#   emotion     emotion / voice-quality embedding
+#   activity    [speech, overlap, non-verbal]
+TRACK_ORDER = ("spk_island", "spk_short", "spk_overlap", "prosody", "emotion", "activity")
 PROSODY_DIM = 3
 ACTIVITY_DIM = 3
 
 
 def track_dims(speaker_dim: int, emotion_dim: int) -> dict[str, int]:
-    return {"spk_island": speaker_dim, "spk_short": speaker_dim, "prosody": PROSODY_DIM,
-            "emotion": emotion_dim, "activity": ACTIVITY_DIM}
+    return {"spk_island": speaker_dim, "spk_short": speaker_dim, "spk_overlap": speaker_dim,
+            "prosody": PROSODY_DIM, "emotion": emotion_dim, "activity": ACTIVITY_DIM}
 
 
 def resample_track(x: torch.Tensor, n_out: int) -> torch.Tensor:
@@ -122,6 +130,75 @@ class Chunk:
     text: str
     stream: int = 0
     ok: bool = True
+
+
+def assign_streams(chunks: list[Chunk], n_streams: int = 2) -> list[Chunk]:
+    """Make sure chunks that overlap in time are on different text streams.
+
+    Streams given by the script are kept when no two chunks of the same stream
+    overlap. Otherwise streams are reassigned greedily in start order (lowest
+    free stream), so an interrupting line goes to stream 1. With more
+    simultaneous lines than streams, the stream that frees up first is reused
+    (its texts then overlap and the earlier one is cut by the later one)."""
+    order = sorted(range(len(chunks)), key=lambda i: (chunks[i].start, chunks[i].end))
+    last_end: dict[int, int] = {}
+    clash = False
+    for i in order:
+        ch = chunks[i]
+        st = min(ch.stream, n_streams - 1)
+        if last_end.get(st, -1) > ch.start:
+            clash = True
+            break
+        last_end[st] = ch.end
+    if not clash:
+        return [replace(c, stream=min(c.stream, n_streams - 1)) for c in chunks]
+    out = list(chunks)
+    free = [-1] * n_streams
+    for i in order:
+        ch = chunks[i]
+        st = next((k for k in range(n_streams) if free[k] <= ch.start), min(range(n_streams), key=lambda k: free[k]))
+        free[st] = max(free[st], ch.end)
+        out[i] = replace(ch, stream=st)
+    return out
+
+
+def overlap_tracks(chunks: list[Chunk], spk_short: torch.Tensor, n: int, n_streams: int = 2,
+                   guard: int = 12) -> tuple[torch.Tensor, torch.Tensor]:
+    """Overlapping-speech conditioning from the time-anchored script.
+
+    Returns (spk_overlap [n, Ds], overlap flag [n]). The flag marks frames where
+    two streams have text at once. For every stream>=1 chunk that overlaps
+    another stream, spk_overlap carries that voice's identity over the chunk,
+    estimated from the sliding-window speaker track on the frames where the
+    chunk is spoken alone (preferring frames >= `guard` frames away from the
+    overlap, where the 1 s window is not blended); if it is never alone, the
+    (mixed) mean over the chunk is used. The same function is used for
+    pretraining, dub fine-tuning and inference."""
+    occ = torch.zeros(n_streams, n, dtype=torch.bool)
+    for ch in chunks:
+        occ[min(ch.stream, n_streams - 1), max(0, ch.start) : min(n, ch.end)] = True
+    flag = occ.sum(0) >= 2
+    out = torch.zeros(n, spk_short.shape[-1])
+    if not flag.any():
+        return out, flag
+    flag_f = flag.float()[None, None]
+    near = F.max_pool1d(flag_f, 2 * guard + 1, 1, guard)[0, 0] > 0
+    for ch in chunks:
+        s, e = max(0, ch.start), min(n, ch.end)
+        st = min(ch.stream, n_streams - 1)
+        if st == 0 or e <= s or not flag[s:e].any():
+            continue
+        others = torch.cat([occ[:st], occ[st + 1 :]], 0)[:, s:e].any(0)
+        seg = spk_short[s:e].float()
+        alive = seg.norm(dim=-1) > 1e-6
+        emb = None
+        for sel in (~others & ~near[s:e] & alive, ~others & alive, alive):
+            if sel.any():
+                emb = seg[sel].mean(0)
+                break
+        if emb is not None and emb.norm() > 1e-6:
+            out[s:e] = emb / emb.norm()
+    return out, flag
 
 
 def tokenize_chunks(chunks: list[Chunk], tokenizer, lang: str) -> tuple[list[int], list[tuple[int, int]]]:

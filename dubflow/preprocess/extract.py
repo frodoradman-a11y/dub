@@ -16,12 +16,20 @@ Cache file `<out>/<id>.pt` contains (25 Hz frames):
   spk_short [N5, Ds] f16  optional 5 Hz sliding-window track (--short-window)
   emo      [N5, De] f16   5 Hz emotion / voice-quality track
 Also writes `<out>/latent_stats.pt` (mean / std / silence latent).
+
+With `--augment N`, N degraded copies of every item are also written as
+`<out>/<id>.aug<k>.pt` (same fields, computed from the degraded audio: noise,
+music / effects bleed, reverb, EQ, band limiting, separation artifacts; see
+`dubflow.utils.augment`). Training uses them for the conditioning side only
+(data.src_aug_p / data.src_aug_versions); they never enter the latent stats.
+Real noise / music stems can be given as JSONL lists ({"audio": path}).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import random
 from pathlib import Path
 
 import torch
@@ -30,6 +38,7 @@ from tqdm import tqdm
 from .. import LATENT_HOP, SAMPLE_RATE
 from ..features.backends import EmotionEmbedder, SpeakerEmbedder
 from ..utils.audio import energy_vad, estimate_f0, frame_energy, load_audio, runs
+from ..utils.augment import SourceAugmenter
 from ..utils.checkpoint import load_vae
 
 
@@ -107,6 +116,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--num-shards", type=int, default=1)
     ap.add_argument("--stats-max-items", type=int, default=5000)
     ap.add_argument("--skip-existing", action="store_true")
+    ap.add_argument("--augment", type=int, default=0, help="also write N degraded copies <id>.aug<k>.pt")
+    ap.add_argument("--noise-list", default=None, help="JSONL of noise recordings for --augment")
+    ap.add_argument("--music-list", default=None, help="JSONL of music / effects stems for --augment")
+    ap.add_argument("--aug-seed", type=int, default=0)
     args = ap.parse_args(argv)
 
     out = Path(args.out)
@@ -116,15 +129,26 @@ def main(argv: list[str] | None = None) -> None:
     spk = SpeakerEmbedder(args.speaker_backend, args.device, SAMPLE_RATE, args.speaker_dim)
     emo = EmotionEmbedder(args.emotion_backend, args.device, SAMPLE_RATE, args.emotion_dim)
     stats = LatentStats(vae.latent_dim)
+    augmenter = SourceAugmenter(SAMPLE_RATE, args.noise_list, args.music_list) if args.augment else None
     for i, row in enumerate(tqdm(rows, desc=f"extract[{args.shard}]")):
         dst = out / f"{row['id']}.pt"
-        if args.skip_existing and dst.exists():
+        aug_dst = [out / f"{row['id']}.aug{k}.pt" for k in range(args.augment)]
+        if args.skip_existing and dst.exists() and all(p.exists() for p in aug_dst):
             continue
         wav = load_audio(row["audio"], SAMPLE_RATE)
-        item = extract_item(wav, vae, spk, emo, args.device, args.short_window)
-        torch.save(item, dst)
-        if i < args.stats_max_items:
-            stats.update(item["latent"].float())
+        if not (args.skip_existing and dst.exists()):
+            item = extract_item(wav, vae, spk, emo, args.device, args.short_window)
+            torch.save(item, dst)
+            if i < args.stats_max_items:
+                stats.update(item["latent"].float())
+        for k, p in enumerate(aug_dst):
+            if args.skip_existing and p.exists():
+                continue
+            augmenter.rng = random.Random(f"{args.aug_seed}:{row['id']}:{k}")  # reproducible per item
+            noisy, info = augmenter(wav)
+            aug_item = extract_item(noisy, vae, spk, emo, args.device, args.short_window)
+            aug_item["aug"] = info
+            torch.save(aug_item, p)
     mean, std = stats.result()
     with torch.no_grad():
         silence = vae.encode(torch.zeros(1, SAMPLE_RATE, device=args.device))[1][0].T.mean(0).float().cpu()

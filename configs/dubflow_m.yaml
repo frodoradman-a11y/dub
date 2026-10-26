@@ -7,6 +7,7 @@ model:
   tracks:                     # must match the feature cache (speaker/emotion dims)
     spk_island: 512           # wavlm_sv = 512, ecapa = 192
     spk_short: 512
+    spk_overlap: 512          # identity of the overlapping (stream-1) voice
     prosody: 3
     emotion: 64
     activity: 3
@@ -31,6 +32,7 @@ model:
     layers: [8]
     target_dim: 1024          # w2v-BERT 2.0 hidden size
     weight: 0.5
+  context: {enabled: true}    # scene continuity: known-prefix input channel
   step_cond: false            # true for distilled students
   t_sampling: {type: logit_normal, mean: 0.0, std: 1.0}
   cfg_dropout: {all: 0.1, text: 0.1, timbre: 0.2, tracks: 0.2}
@@ -56,6 +58,14 @@ data:
   cross_speaker_chunk_p: 0.5
   max_gap_sec: 0.8
   window_min_offset_sec: 3.0
+  overlap_p: 0.15             # synthetic overlapping speech (pretrain; needs --vae for online re-encoding)
+  overlap_min_sec: 0.2
+  overlap_max_sec: 1.5
+  ctx_p: 0.3                  # known-prefix (previous-scene context) training
+  ctx_min_sec: 0.5
+  ctx_max_sec: 4.0
+  src_aug_p: 0.5              # condition on a degraded source copy (extract --augment N)
+  src_aug_versions: 2         # = N used at extraction; 0 disables
   lang_weights: {fa: 6.0, en: 1.0, zh: 0.5}
   num_workers: 8
 
@@ -75,11 +85,13 @@ train:
   precision: bf16
   activation_checkpointing: true
   init_from: null             # e.g. D1 checkpoint when running D2
+  vae: null                   # DubVAE checkpoint (same as --vae)
 
 sample:
   steps: 32
   guidance: {all: 1.5, timbre: 0.5}
   sway: -1.0
+  context_sec: 3.0            # inference: frames of the previous scene given as context
 
 grpo:                         # stage D3 (Flow-GRPO)
   lr: 2.0e-6

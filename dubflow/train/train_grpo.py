@@ -77,6 +77,7 @@ def main(argv: list[str] | None = None) -> None:
     asr = ASR(g.asr_model, str(device)) if g.get("asr_model") else None
 
     stats_ds = dict(stats)
+    cfg.data.ctx_p = 0.0  # rollouts generate whole scenes (no known-context prefix)
     ds = DubDataset(cfg.data.dub_manifest, cfg.data.dub_src_cache, cfg.data.dub_tgt_cache, stats_ds, cfg.data,
                     cfg.model.get("n_streams", 2))
     rng = random.Random(1234 + rank + step)

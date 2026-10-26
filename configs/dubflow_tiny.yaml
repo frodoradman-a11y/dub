@@ -4,7 +4,7 @@ model:
   latent_dim: 16
   dim: 64
   text: {dim: 32, layers: 1, heads: 2}
-  tracks: {spk_island: 16, spk_short: 16, prosody: 3, emotion: 8, activity: 3}
+  tracks: {spk_island: 16, spk_short: 16, spk_overlap: 16, prosody: 3, emotion: 8, activity: 3}
   backbone: {type: dit, depth: 2, heads: 4, local_window: 16}
   timbre: {src_dim: 16, inner: 32, heads: 2, window_half: 4}
   repa: {layers: [0], target_dim: 80, weight: 0.5}
@@ -12,6 +12,9 @@ repa_teacher: {backend: fallback, until_step: 1000}
 data:
   max_frames: 200
   window_min_offset_sec: 0.5
+  overlap_p: 0.5
+  ctx_p: 0.5
+  ctx_max_sec: 1.0
   num_workers: 0
 train:
   out_dir: runs/test_dubflow
@@ -24,6 +27,7 @@ train:
   activation_checkpointing: false
 sample:
   steps: 4
+  context_sec: 1.0
 grpo:
   max_steps: 1
   prompts_per_step: 1

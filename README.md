@@ -7,6 +7,9 @@ same moment, same feeling, new text, with **no speaker diarization**.
 - **DubFlow-M** (quality): ~0.8B DiT backbone + DubVAE (~0.17B)
 - **DubFlow-S** (fast): ~0.2B multi-rate U-Net backbone + DubVAE
 - 24 kHz output, 25 Hz continuous latent, scenes up to 60 s, 1–4 step student
+- overlapping speech (two text streams + identity of the second voice), scene-to-scene
+  continuity (known-context channel), EQ / room matching to the original, and
+  degraded-source augmentation (separated film vocals)
 
 Persian documentation: [`docs/implementation-guide-fa.md`](docs/implementation-guide-fa.md) (full guide),
 [`docs/dubflow-plan-b-fa.md`](docs/dubflow-plan-b-fa.md) (design / proposal).

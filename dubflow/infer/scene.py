@@ -8,10 +8,13 @@ import torch
 from .. import FRAME_RATE, LATENT_HOP, SAMPLE_RATE
 from ..data.datasets import collate
 from ..data.tracks import (
+    TRACK_ORDER,
     Chunk,
     activity_track,
+    assign_streams,
     build_frame_tok,
     island_track,
+    overlap_tracks,
     prosody_track,
     resample_track,
     tokenize_chunks,
@@ -44,9 +47,12 @@ def split_scenes(src: torch.Tensor, chunks: list[dict], max_sec: float, min_sec:
 
 @torch.no_grad()
 def build_scene_batch(src_scene: torch.Tensor, scene_chunks: list[dict], lang: str, vae, spk, emo, stats: dict,
-                      n_streams: int, device) -> tuple[dict, dict]:
+                      n_streams: int, device, ctx: torch.Tensor | None = None) -> tuple[dict, dict]:
     """src_scene: original vocals of the scene (24 kHz). scene_chunks: chunks with
-    times relative to the scene start (seconds). Returns (batch, raw_features)."""
+    times relative to the scene start (seconds); overlapping lines are put on
+    different text streams. ctx: optional normalized latent [K, D] of already
+    generated dub for the first K frames (continuity with the previous scene).
+    Returns (batch, raw_features)."""
     feats = extract_item(src_scene, vae, spk, emo, str(device), short_window=True)
     n = int(feats["n_frames"])
     mean, std = stats["mean"].float(), stats["std"].float()
@@ -55,9 +61,12 @@ def build_scene_batch(src_scene: torch.Tensor, scene_chunks: list[dict], lang: s
     short = resample_track(feats["spk_short"].float(), n)
     pro = prosody_track(feats["f0"], feats["energy"], feats["vad"])
     emo_t = resample_track(feats["emo"].float(), n)
-    act = activity_track(feats["vad"])
     chunks = [Chunk(int(round(c["t0"] * FRAME_RATE)), max(int(round(c["t1"] * FRAME_RATE)), int(round(c["t0"] * FRAME_RATE)) + 1),
                     c["text"], int(c.get("stream", 0))) for c in scene_chunks]
+    chunks = assign_streams(chunks, n_streams)
+    spk_ov, ov_flag = overlap_tracks(chunks, short, n, n_streams)
+    tracks = {"spk_island": isl, "spk_short": short, "spk_overlap": spk_ov, "prosody": pro, "emotion": emo_t,
+              "activity": activity_track(feats["vad"], overlap=ov_flag)}
     tok = TextTokenizer()
     ids, spans = tokenize_chunks(chunks, tok, lang)
     item = {
@@ -65,12 +74,18 @@ def build_scene_batch(src_scene: torch.Tensor, scene_chunks: list[dict], lang: s
         "text": torch.tensor(ids or [tok.space_id], dtype=torch.long),
         "frame_tok": build_frame_tok(chunks, spans, n, n_streams),
         "lang": LANGS.get(lang, LANGS["other"]),
-        "tracks": torch.cat([isl, short, pro, emo_t, act], -1).float(),
+        "tracks": torch.cat([tracks[k] for k in TRACK_ORDER], -1).float(),
         "src_latent": src_lat,
         "win_center": torch.arange(n),
         "loss_mask": torch.ones(n, dtype=torch.bool),
+        "ctx_mask": torch.zeros(n, dtype=torch.bool),
     }
+    if ctx is not None and ctx.shape[0]:
+        k = min(ctx.shape[0], n)
+        item["x1"][:k] = ctx[:k].float().cpu()
+        item["ctx_mask"][:k] = True
     batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in collate([item]).items()}
+    batch["ctx"] = batch["x1"].clone()
     return batch, feats
 
 

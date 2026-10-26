@@ -1,0 +1,40 @@
+# Tiny config for CPU unit tests / smoke runs only.
+_base_: dubflow_m.yaml
+model:
+  latent_dim: 16
+  dim: 64
+  text: {dim: 32, layers: 1, heads: 2}
+  tracks: {spk_island: 16, spk_short: 16, prosody: 3, emotion: 8, activity: 3}
+  backbone: {type: dit, depth: 2, heads: 4, local_window: 16}
+  timbre: {src_dim: 16, inner: 32, heads: 2, window_half: 4}
+  repa: {layers: [0], target_dim: 80, weight: 0.5}
+repa_teacher: {backend: fallback, until_step: 1000}
+data:
+  max_frames: 200
+  window_min_offset_sec: 0.5
+  num_workers: 0
+train:
+  out_dir: runs/test_dubflow
+  batch_size: 2
+  warmup_steps: 1
+  max_steps: 3
+  log_every: 1
+  save_every: 2
+  precision: fp32
+  activation_checkpointing: false
+sample:
+  steps: 4
+grpo:
+  max_steps: 1
+  prompts_per_step: 1
+  group_size: 2
+  steps: 4
+  window: 2
+  window_start_min: 1
+  window_start_max: 1
+  speaker_backend: fallback
+  speaker_dim: 16
+distill:
+  max_steps: 2
+  student_steps: 2
+  teacher_substeps: 2

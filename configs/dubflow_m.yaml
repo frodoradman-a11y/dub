@@ -1,0 +1,108 @@
+# DubFlow-M: quality model. ~700M DiT backbone, ~0.85B total (without VAE).
+model:
+  latent_dim: 64
+  dim: 1280
+  n_streams: 2
+  text: {dim: 640, layers: 8, heads: 10}
+  tracks:                     # must match the feature cache (speaker/emotion dims)
+    spk_island: 512           # wavlm_sv = 512, ecapa = 192
+    spk_short: 512
+    prosody: 3
+    emotion: 64
+    activity: 3
+  backbone:
+    type: dit
+    depth: 24
+    heads: 20
+    mlp_mult: 4.0
+    local_window: 64          # frames (~2.5 s) for local-attention layers
+    local_every: 2            # every 2nd layer is local, the rest global
+  timbre:
+    enabled: true
+    src_dim: 256
+    src_layers: 2
+    heads: 4
+    inner: 256
+    window_half: 25           # +-1 s at 25 Hz
+    window_stride: 1
+    every: 2
+  repa:
+    enabled: true
+    layers: [8]
+    target_dim: 1024          # w2v-BERT 2.0 hidden size
+    weight: 0.5
+  step_cond: false            # true for distilled students
+  t_sampling: {type: logit_normal, mean: 0.0, std: 1.0}
+  cfg_dropout: {all: 0.1, text: 0.1, timbre: 0.2, tracks: 0.2}
+
+repa_teacher:
+  backend: w2v_bert           # w2v_bert | fallback
+  layer: 16
+  until_step: 200000          # disable REPA after this step (common practice)
+
+data:
+  stage: pretrain             # pretrain (D1) | dub (D2)
+  manifest: data/pretrain_manifest.jsonl
+  cache: feats/pretrain
+  index: feats/pretrain/index.pt
+  dub_manifest: data/dub_pairs.jsonl
+  dub_src_cache: feats/dub_src
+  dub_tgt_cache: feats/dub_tgt
+  max_frames: 1500            # 60 s scenes
+  scene_p: 0.5
+  max_scene_speakers: 3
+  hard_negative_p: 0.5
+  no_gap_p: 0.3
+  cross_speaker_chunk_p: 0.5
+  max_gap_sec: 0.8
+  window_min_offset_sec: 3.0
+  lang_weights: {fa: 6.0, en: 1.0, zh: 0.5}
+  num_workers: 8
+
+train:
+  out_dir: runs/dubflow_m
+  batch_size: 8               # per GPU (scenes up to 60 s)
+  grad_accum: 1
+  lr: 1.0e-4
+  weight_decay: 0.01
+  betas: [0.9, 0.95]
+  warmup_steps: 5000
+  max_steps: 400000
+  ema_decay: 0.9999
+  grad_clip: 1.0
+  log_every: 100
+  save_every: 5000
+  precision: bf16
+  activation_checkpointing: true
+  init_from: null             # e.g. D1 checkpoint when running D2
+
+sample:
+  steps: 32
+  guidance: {all: 1.5, timbre: 0.5}
+  sway: -1.0
+
+grpo:                         # stage D3 (Flow-GRPO)
+  lr: 2.0e-6
+  max_steps: 600
+  prompts_per_step: 4         # per GPU
+  group_size: 8
+  steps: 16
+  window: 6                   # stochastic (SDE) steps per rollout (MixGRPO)
+  window_start_min: 1
+  window_start_max: 6
+  noise_level: 0.7
+  guidance: 1.5               # CFG (drop-all) used in rollouts and in the policy
+  clip: 0.2
+  kl_beta: 0.02
+  speaker_backend: wavlm_sv
+  asr_model: null             # e.g. a Persian-finetuned Whisper; null = no CER reward
+  reward_weights: {sim: 1.0, ssp: 1.0, cer: 0.5}
+  gates: {boundary: 0.08, cer: 0.15}
+
+distill:                      # stage D4
+  lr: 2.0e-5
+  max_steps: 30000
+  student_steps: 4
+  teacher_substeps: 4
+  one_step_p: 0.2
+  guidance: {all: 1.5, timbre: 0.5}

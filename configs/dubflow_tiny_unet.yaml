@@ -1,0 +1,5 @@
+_base_: dubflow_tiny.yaml
+model:
+  backbone: {type: unet, heads: 4, stage_blocks: [1, 1, 1, 1, 1], stage_rates: [1, 2, 4, 2, 1], local_window: 16}
+  timbre: {every: 1}
+  repa: {layers: [1]}

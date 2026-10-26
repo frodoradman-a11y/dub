@@ -1,0 +1,20 @@
+_base_: vae.yaml
+model:
+  latent_dim: 16
+  enc_channels: 8
+  dec_channels: 64
+  semantic_dim: 80
+semantic:
+  teacher: fallback
+disc:
+  channels: 8
+train:
+  out_dir: runs/test_vae
+  batch_size: 2
+  max_steps: 4
+  disc_start_step: 2
+  log_every: 1
+  save_every: 2
+  precision: fp32
+data:
+  num_workers: 0

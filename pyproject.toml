@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dubflow"
+version = "0.1.0"
+description = "DubFlow: time-synchronous flow-matching model for EN<->FA scene dubbing"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.3",
+    "torchaudio>=2.3",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    "soundfile>=0.12",
+    "scipy>=1.10",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+# Pretrained feature extractors used in production preprocessing / rewards.
+features = [
+    "transformers>=4.44",
+    "speechbrain>=1.0",
+    "funasr>=1.1",
+]
+logging = ["tensorboard>=2.15"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+dubflow-extract = "dubflow.preprocess.extract:main"
+dubflow-build-dub-pairs = "dubflow.preprocess.build_dub_pairs:main"
+dubflow-train-vae = "dubflow.train.train_vae:main"
+dubflow-train = "dubflow.train.train_dubflow:main"
+dubflow-train-grpo = "dubflow.train.train_grpo:main"
+dubflow-distill = "dubflow.train.distill:main"
+dubflow-dub = "dubflow.infer.dub:main"
+dubflow-params = "dubflow.tools.count_params:main"
+
+[tool.setuptools.packages.find]
+include = ["dubflow*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

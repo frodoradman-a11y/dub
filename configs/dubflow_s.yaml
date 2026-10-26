@@ -1,0 +1,19 @@
+# DubFlow-S: fast model. ~200M multi-rate U-Net backbone, ~0.25B total (without VAE).
+_base_: dubflow_m.yaml
+model:
+  dim: 768
+  text: {dim: 512, layers: 6, heads: 8}
+  backbone:
+    type: unet
+    heads: 12
+    stage_blocks: [2, 3, 6, 3, 2]
+    stage_rates: [1, 2, 4, 2, 1]
+    mlp_mult: 4.0
+    local_window: 64
+  timbre: {every: 1}
+  repa:
+    layers: [1]               # stage index (upsampled to full rate)
+train:
+  out_dir: runs/dubflow_s
+  batch_size: 16
+  lr: 2.0e-4

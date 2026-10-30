@@ -61,6 +61,9 @@ def load_stats(cfg) -> dict:
     if stats is None:
         cache = cfg.data.cache if cfg.data.stage == "pretrain" else cfg.data.dub_tgt_cache
         stats = merge_latent_stats(cache)
+    if int(stats["mean"].numel()) != int(cfg.model.latent_dim):
+        raise ValueError(f"feature cache latents are {stats['mean'].numel()}-dim (VAE '{stats.get('vae_kind', 'dubvae')}') "
+                         f"but model.latent_dim={cfg.model.latent_dim}: use configs/dubflow_*_auk.yaml for AuK-VAE")
     dims = {"spk_island": stats["speaker_dim"], "spk_short": stats["speaker_dim"], "spk_overlap": stats["speaker_dim"],
             "emotion": stats["emotion_dim"]}
     for k, v in dims.items():
@@ -91,8 +94,9 @@ def reencode_overlaps(batch: dict, vae, stats: dict) -> None:
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
-    ap.add_argument("--vae", default=None, help="DubVAE checkpoint: audio samples, and encoding of synthetic "
-                                                "overlap scenes (required when data.overlap_p > 0 in pretraining)")
+    ap.add_argument("--vae", default=None,
+                    help="DubVAE checkpoint or AuK-VAE ('auk' / vae.safetensors): audio samples, and encoding of "
+                         "synthetic overlap scenes (required when data.overlap_p > 0 in pretraining)")
     ap.add_argument("overrides", nargs="*")
     args = ap.parse_args(argv)
     cfg = load_config(args.config, args.overrides)
@@ -143,9 +147,10 @@ def main(argv: list[str] | None = None) -> None:
         if not vae_path:
             raise ValueError("data.overlap_p > 0 needs the DubVAE to encode mixed overlap scenes: pass --vae "
                              "(or train.vae=...), or set data.overlap_p=0")
-        from ..utils.checkpoint import load_vae
+        from ..utils.checkpoint import check_vae_compat, load_vae
 
         overlap_vae = load_vae(vae_path, device)
+        check_vae_compat(overlap_vae, cfg.model.latent_dim, stats)
         overlap_vae.requires_grad_(False)
     repa_on = bool(cfg.model.repa.enabled)
     teacher = SSLTeacher(cfg.repa_teacher.backend, str(device), SAMPLE_RATE, cfg.repa_teacher.get("layer", 16)) if repa_on else None
@@ -185,7 +190,8 @@ def main(argv: list[str] | None = None) -> None:
         if rank == 0 and (step % cfg.train.save_every == 0 or step == cfg.train.max_steps):
             payload = dict(config=cfg.to_dict(), model=unwrap(model).state_dict(), ema=ema.state_dict(),
                            opt=opt.state_dict(), step=step,
-                           latent_stats={k: stats[k] for k in ("mean", "std", "silence", "speaker_dim", "emotion_dim")})
+                           latent_stats={k: stats[k] for k in ("mean", "std", "silence", "speaker_dim", "emotion_dim",
+                                                               "vae_kind") if k in stats})
             save_checkpoint(last, **payload)
             payload.pop("opt")
             save_checkpoint(out_dir / f"dubflow_{step:07d}.pt", **payload)

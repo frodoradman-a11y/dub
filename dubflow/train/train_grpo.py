@@ -26,7 +26,7 @@ from ..eval.metrics import ASR, boundary_error, cer, island_similarity, ssp
 from ..features.backends import SpeakerEmbedder
 from ..model.dubflow import DubFlow
 from ..rl.flow_grpo import combine_rewards, group_advantages, grpo_loss, rollout
-from ..utils.checkpoint import load_checkpoint, load_vae, save_checkpoint, unwrap
+from ..utils.checkpoint import check_vae_compat, load_checkpoint, load_vae, save_checkpoint, unwrap
 from ..utils.config import load_config, save_config
 from ..utils.train_utils import Logger, cleanup_distributed, seed_everything, setup_distributed, to_device
 
@@ -73,6 +73,7 @@ def main(argv: list[str] | None = None) -> None:
         opt.load_state_dict(ck2["opt"])
         step = ck2["step"]
     vae = load_vae(args.vae, device)
+    check_vae_compat(vae, cfg.model.latent_dim, stats)
     spk = SpeakerEmbedder(g.get("speaker_backend", "wavlm_sv"), str(device), SAMPLE_RATE, g.get("speaker_dim"))
     asr = ASR(g.asr_model, str(device)) if g.get("asr_model") else None
 

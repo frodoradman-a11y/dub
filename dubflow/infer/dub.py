@@ -21,7 +21,7 @@ import torch
 from .. import FRAME_RATE, LATENT_HOP, SAMPLE_RATE
 from ..features.backends import EmotionEmbedder, SpeakerEmbedder
 from ..utils.audio import load_audio, save_audio
-from ..utils.checkpoint import load_checkpoint, load_dubflow, load_vae
+from ..utils.checkpoint import check_vae_compat, load_checkpoint, load_dubflow, load_vae
 from .acoustics import apply_room, decay_stats, fit_room, ltas_bands, match_eq
 from .scene import build_scene_batch, match_loudness, split_scenes
 
@@ -120,6 +120,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.guidance_timbre is not None:
         guidance["timbre"] = args.guidance_timbre
     vae = load_vae(args.vae, device)
+    check_vae_compat(vae, cfg.model.latent_dim, stats)
     spk = SpeakerEmbedder(args.speaker_backend, str(device), SAMPLE_RATE, int(stats["speaker_dim"]))
     if spk.dim != int(stats["speaker_dim"]):
         raise ValueError(f"speaker backend dim {spk.dim} != model {stats['speaker_dim']}")

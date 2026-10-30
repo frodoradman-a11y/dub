@@ -1,0 +1,6 @@
+# DubFlow-S on the AuK-VAE latent space (see dubflow_m_auk.yaml).
+_base_: dubflow_s.yaml
+model:
+  latent_dim: 128
+train:
+  out_dir: runs/dubflow_s_auk

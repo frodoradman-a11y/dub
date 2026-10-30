@@ -104,7 +104,7 @@ class LatentStats:
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--manifest", required=True)
-    ap.add_argument("--vae", required=True, help="DubVAE checkpoint")
+    ap.add_argument("--vae", required=True, help="DubVAE checkpoint, or AuK-VAE ('auk' / vae.safetensors)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--speaker-backend", default="wavlm_sv")
@@ -154,7 +154,8 @@ def main(argv: list[str] | None = None) -> None:
         silence = vae.encode(torch.zeros(1, SAMPLE_RATE, device=args.device))[1][0].T.mean(0).float().cpu()
     stats_path = out / ("latent_stats.pt" if args.num_shards == 1 else f"latent_stats.shard{args.shard}.pt")
     torch.save({"mean": mean, "std": std, "silence": silence, "n": stats.n,
-                "speaker_backend": args.speaker_backend, "speaker_dim": spk.dim, "emotion_dim": args.emotion_dim}, stats_path)
+                "speaker_backend": args.speaker_backend, "speaker_dim": spk.dim, "emotion_dim": args.emotion_dim,
+                "vae_kind": getattr(vae, "kind", "dubvae")}, stats_path)
     print(f"wrote {len(rows)} items and {stats_path}")
 
 

@@ -3,6 +3,9 @@ export NGPU=${NGPU:-8}
 export CFG=${CFG:-configs/dubflow_m.yaml}       # or configs/dubflow_s.yaml
 export RUN=${RUN:-runs/m}                      # output root for this model size
 export VAE_CKPT=${VAE_CKPT:-runs/vae/last.pt}
+# AuK-VAE instead of training DubVAE (skip stage D0):
+#   hf download tencent/AuK vae.safetensors --local-dir ckpts/auk
+#   export VAE_CKPT=ckpts/auk/vae.safetensors CFG=configs/dubflow_m_auk.yaml   # or dubflow_s_auk.yaml
 export SPK_BACKEND=${SPK_BACKEND:-wavlm_sv}
 export EMO_BACKEND=${EMO_BACKEND:-emotion2vec}
 export TORCHRUN="torchrun --nproc_per_node=${NGPU}"

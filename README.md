@@ -7,6 +7,8 @@ same moment, same feeling, new text, with **no speaker diarization**.
 - **DubFlow-M** (quality): ~0.8B DiT backbone + DubVAE (~0.17B)
 - **DubFlow-S** (fast): ~0.2B multi-rate U-Net backbone + DubVAE
 - 24 kHz output, 25 Hz continuous latent, scenes up to 60 s, 1–4 step student
+- VAE: train DubVAE, or use the released **AuK-VAE** (MIT; 50 Hz × 64 folded to 25 Hz × 128):
+  `VAE_CKPT=ckpts/auk/vae.safetensors CFG=configs/dubflow_m_auk.yaml` and skip D0
 - overlapping speech (two text streams + identity of the second voice), scene-to-scene
   continuity (known-context channel), EQ / room matching to the original, and
   degraded-source augmentation (separated film vocals)

@@ -115,6 +115,8 @@ class Decoder(nn.Module):
 
 
 class DubVAE(nn.Module):
+    kind = "dubvae"
+
     def __init__(
         self,
         latent_dim: int = 64,

@@ -1,0 +1,9 @@
+# DubFlow-M on the AuK-VAE latent space (no D0 stage: the released VAE is used).
+# AuK-VAE is 64-dim at 50 Hz; the adapter folds 2 frames into one 128-dim frame at
+# 25 Hz (patch size 2 in time), so everything else in the model is unchanged.
+#   VAE_CKPT=auk  (downloads tencent/AuK vae.safetensors)  or a local vae.safetensors
+_base_: dubflow_m.yaml
+model:
+  latent_dim: 128
+train:
+  out_dir: runs/dubflow_m_auk
